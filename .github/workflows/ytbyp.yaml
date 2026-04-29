@@ -1,10 +1,10 @@
-name: Poo poo (Self-Contained)
+name: Poo poo - Download from URLs & Save to Repo
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Space-separated list of URLs to download (YouTube, direct links, etc.)'
+        description: 'Space-separated list of URLs to download'
         required: true
         type: string
       mode:
@@ -18,7 +18,7 @@ on:
       split_threshold_mb:
         description: 'Split files larger than this MB (0 = never split)'
         required: false
-        default: 90
+        default:90
         type: number
       youtube_format:
         description: 'YouTube quality (best/bestvideo+bestaudio/bestaudio/worst)'
@@ -27,108 +27,70 @@ on:
         type: string
 
 jobs:
-  save-file:
+  poo-poo-saver:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      # --- 1. Set up Cloudflare WARP (Free & Automatic) ---
+      - name: Set up Cloudflare WARP
+        uses: viperadnan-git/setup-warp@v1
+        with:
+          mode: client          # Generates fresh credentials for each run
+          stack: dual           # Uses both IPv4 and IPv6
+          configure_docker: true
+
+      # --- 2. Prepare the runner environment ---
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Dependencies
+      - name: Install yt-dlp and other tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 zip ffmpeg python3-pip nodejs npm
-          pip3 install yt-dlp --break-system-packages || pip3 install yt-dlp
-          
-          # Install and setup PO Token Provider (runs locally)
-          git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git
-          cd bgutil-ytdlp-pot-provider/server
-          npm install
-          npm run build
-          cd ../..
+          sudo apt-get install -y aria2 zip ffmpeg python3-pip
+          pip3 install yt-dlp --break-system-packages
 
-      - name: Start PO Token Provider Server
-        run: |
-          cd bgutil-ytdlp-pot-provider/server
-          # Start server in background
-          npm run start:http &
-          # Wait for server to be ready
-          sleep 5
-          cd ../..
-          echo "✅ PO Token Provider running on http://localhost:4416"
-
-      - name: AVASAM Downloader - https://avasam.ir
-        run: |
-          echo "🏷️  AVASAM - Your Download Solution (Self-Contained)"
-          echo "🌐 https://avasam.ir"
-          echo ""
-
-      - name: Download files (YouTube with Local PO Token Provider)
+      - name: Poo poo Downloader
         run: |
           MODE="${{ github.event.inputs.mode }}"
           URLS="${{ github.event.inputs.urls }}"
           SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
           YT_FORMAT="${{ github.event.inputs.youtube_format }}"
           SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
-          # Use local provider
-          POT_PROVIDER_URL="http://localhost:4416"
-
-          echo "🏷️  AVASAM (https://avasam.ir) - Downloading with mode: $MODE"
-          echo "Split threshold: $SPLIT_THRESHOLD_MB MB"
-          echo "YouTube format: $YT_FORMAT"
 
           mkdir -p downloads tmp_downloads
 
-          # Download each URL
           for URL in $URLS; do
             echo "⬇️ Processing: $URL"
-            
+
             if [[ "$URL" =~ (youtube\.com|youtu\.be) ]]; then
-              echo "🎬 YouTube detected! Using local PO Token Provider..."
+              echo "🎬 YouTube video detected!"
               cd tmp_downloads
-              
-              # Try primary method with PO token
-              yt-dlp \
+
+              # Try downloading with the main video format
+              if yt-dlp \
                 -f "$YT_FORMAT" \
                 --merge-output-format mkv \
                 --no-playlist \
-                --extractor-args "youtube:pot_provider_url=$POT_PROVIDER_URL,player_client=android,web" \
                 --retries 5 \
                 --output "%(title)s.%(ext)s" \
-                "$URL"
-              
-              # If fails, try with iOS client spoofing
-              if [ $? -ne 0 ]; then
-                echo "⚠️ Android client failed, trying iOS..."
-                yt-dlp \
-                  -f "$YT_FORMAT" \
-                  --merge-output-format mkv \
-                  --no-playlist \
-                  --extractor-args "youtube:pot_provider_url=$POT_PROVIDER_URL,player_client=ios,web" \
-                  --retries 5 \
-                  --output "%(title)s.%(ext)s" \
-                  "$URL"
-              fi
-              
-              # Last resort: audio only
-              if [ $? -ne 0 ]; then
-                echo "⚠️ Video download failed, trying audio only..."
+                "$URL"; then
+                echo "✅ Download successful with format: $YT_FORMAT"
+              else
+                echo "⚠️ Standard format failed. Falling back to audio-only..."
                 yt-dlp \
                   -f "bestaudio" \
                   --extract-audio \
                   --audio-format mp3 \
                   --no-playlist \
-                  --extractor-args "youtube:pot_provider_url=$POT_PROVIDER_URL,player_client=android" \
+                  --retries 5 \
                   --output "%(title)s.%(ext)s" \
                   "$URL"
               fi
-              
               cd ..
             else
-              # Regular direct download
               FILENAME=$(basename "$URL")
               echo "📁 Direct download: $FILENAME"
               aria2c \
@@ -141,14 +103,13 @@ jobs:
             fi
           done
 
-          # Zip all downloads if mode is 'zip'
+          # --- File Processing (Zip or Split) ---
           if [ "$MODE" = "zip" ]; then
-            ARCHIVE_NAME="downloads/archive_$(date +%Y%m%d_%H%M%S).zip"
+            ARCHIVE_NAME="downloads/poo_poo_archive_$(date +%Y%m%d_%H%M%S).zip"
             echo "📦 Creating zip archive: $ARCHIVE_NAME"
             zip -j "$ARCHIVE_NAME" tmp_downloads/* 2>/dev/null || true
             rm -rf tmp_downloads
           else
-            # Normal mode: handle splitting large files
             for FILE in tmp_downloads/*; do
               [ -f "$FILE" ] || continue
               SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo "0")
@@ -157,6 +118,7 @@ jobs:
               if [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
                 echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting"
                 zip -0 -s "${SPLIT_THRESHOLD_MB}m" "downloads/${BASENAME}.zip" -j "$FILE"
+                echo "✅ Created parts: $(ls downloads/${BASENAME}.z* 2>/dev/null | wc -l)"
               else
                 cp "$FILE" "downloads/$BASENAME"
               fi
@@ -164,32 +126,19 @@ jobs:
             rm -rf tmp_downloads
           fi
 
-      - name: Kill PO Token Provider Server
-        run: |
-          pkill -f "bgutil-ytdlp-pot-provider" || true
-          echo "🧹 Cleaned up background processes"
-
-      - name: Commit & Push
+      - name: Commit & Push results
         run: |
           BRANCH="${GITHUB_REF_NAME}"
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          echo "🏷️  AVASAM (https://avasam.ir) - Preparing to commit files"
-
-          # Add all files
           git add downloads/ || true
-          
-          # Commit if there are changes
           if git diff --staged --quiet; then
-            echo "No changes to commit"
+            echo "No new files to commit."
             exit 0
           fi
-          
-          git commit -m "[AVASAM] Add downloaded files [skip ci]"
-          
-          # Push
+
+          git commit -m "[Poo poo] Add downloaded files [skip ci]"
           git pull --rebase origin "$BRANCH" || true
           git push origin HEAD:"$BRANCH"
-
-          echo "🎉 Files pushed — AVASAM (https://avasam.ir)"
+          echo "🎉 Files successfully pushed to the repository!"

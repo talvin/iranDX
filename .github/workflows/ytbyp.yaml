@@ -1,10 +1,10 @@
-name: AVASAMYT - Download from URLs & Save to Repo
+name: Poo poo (Self-Contained)
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Space-separated list of URLs to download'
+        description: 'Space-separated list of URLs to download (YouTube, direct links, etc.)'
         required: true
         type: string
       mode:
@@ -21,7 +21,7 @@ on:
         default: 90
         type: number
       youtube_format:
-        description: 'YouTube quality format'
+        description: 'YouTube quality (best/bestvideo+bestaudio/bestaudio/worst)'
         required: false
         default: 'best'
         type: string
@@ -37,31 +37,47 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install latest yt-dlp (critical - must be latest)
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 zip ffmpeg python3-pip
-          # Install latest yt-dlp directly from GitHub (not apt package!)
-          # APT packages are often outdated and don't have the latest bypasses[citation:1]
-          sudo pip3 install --break-system-packages --upgrade yt-dlp
-          # Verify version
-          yt-dlp --version
+          sudo apt-get install -y aria2 zip ffmpeg python3-pip nodejs npm
+          pip3 install yt-dlp --break-system-packages || pip3 install yt-dlp
+          
+          # Install and setup PO Token Provider (runs locally)
+          git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git
+          cd bgutil-ytdlp-pot-provider/server
+          npm install
+          npm run build
+          cd ../..
+
+      - name: Start PO Token Provider Server
+        run: |
+          cd bgutil-ytdlp-pot-provider/server
+          # Start server in background
+          npm run start:http &
+          # Wait for server to be ready
+          sleep 5
+          cd ../..
+          echo "✅ PO Token Provider running on http://localhost:4416"
 
       - name: AVASAM Downloader - https://avasam.ir
         run: |
-          echo "🏷️  AVASAM - Your Download Solution"
+          echo "🏷️  AVASAM - Your Download Solution (Self-Contained)"
           echo "🌐 https://avasam.ir"
-          echo "⚠️  Note: Age-restricted videos require cookies. Without cookies, only works on public videos."
           echo ""
 
-      - name: Download files (YouTube optimized)
+      - name: Download files (YouTube with Local PO Token Provider)
         run: |
           MODE="${{ github.event.inputs.mode }}"
           URLS="${{ github.event.inputs.urls }}"
           SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
           YT_FORMAT="${{ github.event.inputs.youtube_format }}"
           SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
+          # Use local provider
+          POT_PROVIDER_URL="http://localhost:4416"
 
+          echo "🏷️  AVASAM (https://avasam.ir) - Downloading with mode: $MODE"
+          echo "Split threshold: $SPLIT_THRESHOLD_MB MB"
           echo "YouTube format: $YT_FORMAT"
 
           mkdir -p downloads tmp_downloads
@@ -71,39 +87,41 @@ jobs:
             echo "⬇️ Processing: $URL"
             
             if [[ "$URL" =~ (youtube\.com|youtu\.be) ]]; then
-              echo "🎬 YouTube detected!"
+              echo "🎬 YouTube detected! Using local PO Token Provider..."
               cd tmp_downloads
               
-              # Method that works in 2026 for public videos[citation:3][citation:7]
-              # Uses android client + multiple extraction attempts + retry logic
+              # Try primary method with PO token
               yt-dlp \
                 -f "$YT_FORMAT" \
                 --merge-output-format mkv \
-                --extractor-args "youtube:player_client=android,web;youtube:skip=hls,dash" \
-                --geo-bypass \
-                --retries 10 \
-                --fragment-retries 10 \
-                --sleep-requests 2 \
-                --sleep-interval 3 \
-                --max-sleep-interval 8 \
-                --no-check-certificate \
+                --no-playlist \
+                --extractor-args "youtube:pot_provider_url=$POT_PROVIDER_URL,player_client=android,web" \
+                --retries 5 \
                 --output "%(title)s.%(ext)s" \
-                "$URL" \
-                2>&1 | tee download.log
+                "$URL"
               
-              # If failed with "Sign in to confirm" error, try with rate limiting delay[citation:1]
-              if grep -q "Sign in to confirm\|bot" download.log; then
-                echo "⚠️ YouTube bot detection triggered. Waiting 60 seconds then retrying..."
-                sleep 60
+              # If fails, try with iOS client spoofing
+              if [ $? -ne 0 ]; then
+                echo "⚠️ Android client failed, trying iOS..."
                 yt-dlp \
                   -f "$YT_FORMAT" \
                   --merge-output-format mkv \
-                  --extractor-args "youtube:player_client=ios,android" \
-                  --sleep-requests 5 \
-                  --sleep-interval 5 \
-                  --max-sleep-interval 15 \
-                  --limit-rate 2M \
-                  --retries 20 \
+                  --no-playlist \
+                  --extractor-args "youtube:pot_provider_url=$POT_PROVIDER_URL,player_client=ios,web" \
+                  --retries 5 \
+                  --output "%(title)s.%(ext)s" \
+                  "$URL"
+              fi
+              
+              # Last resort: audio only
+              if [ $? -ne 0 ]; then
+                echo "⚠️ Video download failed, trying audio only..."
+                yt-dlp \
+                  -f "bestaudio" \
+                  --extract-audio \
+                  --audio-format mp3 \
+                  --no-playlist \
+                  --extractor-args "youtube:pot_provider_url=$POT_PROVIDER_URL,player_client=android" \
                   --output "%(title)s.%(ext)s" \
                   "$URL"
               fi
@@ -112,6 +130,7 @@ jobs:
             else
               # Regular direct download
               FILENAME=$(basename "$URL")
+              echo "📁 Direct download: $FILENAME"
               aria2c \
                 --split=2 \
                 --max-connection-per-server=2 \
@@ -132,7 +151,6 @@ jobs:
             # Normal mode: handle splitting large files
             for FILE in tmp_downloads/*; do
               [ -f "$FILE" ] || continue
-              [[ "$FILE" == *.log ]] && continue
               SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo "0")
               BASENAME=$(basename "$FILE")
 
@@ -146,13 +164,32 @@ jobs:
             rm -rf tmp_downloads
           fi
 
+      - name: Kill PO Token Provider Server
+        run: |
+          pkill -f "bgutil-ytdlp-pot-provider" || true
+          echo "🧹 Cleaned up background processes"
+
       - name: Commit & Push
         run: |
           BRANCH="${GITHUB_REF_NAME}"
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          git add downloads/
-          git commit -m "[AVASAM] Add downloaded files [skip ci]" || echo "No changes to commit"
+          echo "🏷️  AVASAM (https://avasam.ir) - Preparing to commit files"
+
+          # Add all files
+          git add downloads/ || true
+          
+          # Commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          git commit -m "[AVASAM] Add downloaded files [skip ci]"
+          
+          # Push
           git pull --rebase origin "$BRANCH" || true
           git push origin HEAD:"$BRANCH"
+
+          echo "🎉 Files pushed — AVASAM (https://avasam.ir)"
